@@ -14,25 +14,67 @@ from PySide6.QtWidgets import (
     QWidget,
     QMessageBox,
 )
+import pandas as pd
 from PySide6.QtGui import QColor, QMovie
 from pdf_utils import process_pdf, pdf_check
+from openpyxl import load_workbook
+
+class AppInit(QThread):
+    init_complete = Signal()  # For generic completion signal
+    init_error = Signal(str)  # For error handling
+    init_success = Signal(pd.DataFrame, object, object)  # Emits DataFrame, Workbook, Worksheet
+
+    def __init__(self, excel_path):
+        super().__init__()
+        self.excel_path = excel_path
+
+    def run(self):
+        try:
+            # Load Excel data into pandas DataFrame
+            mt_df = pd.read_excel(self.excel_path, sheet_name='Sheet1', engine='openpyxl')
+
+            # Load the workbook and worksheet using openpyxl
+            wb = load_workbook(self.excel_path)
+            ws = wb['Sheet1']
+
+            # Emit the success signal with the loaded data
+            self.init_success.emit(mt_df, wb, ws)
+            self.init_complete.emit()  # Optionally emit a completion signal
+        except Exception as e:
+            self.init_error.emit(str(e))
+
+    def clean_up(self):
+        """Method to clean up after thread finishes."""
+       
+        if self.isRunning():
+            self.quit() 
+            self.wait()  
+        self.deleteLater()  
+
 
 class ScannerThread(QThread):
     """Thread for scanning PDFs."""
     scan_completed = Signal(str, dict)  
+    scan_finished = Signal()
     scan_error = Signal(str)  
 
-    def __init__(self, file_path):
+    def __init__(self, uploaded_files, poppler_path, mt_df, wb, ws):
         super().__init__()
-        self.file_path = file_path
+        self.uploaded_files = uploaded_files
+        self.poppler_path = poppler_path
+        self.mt_df = mt_df
+        self.wb = wb
+        self.ws = ws
 
     def run(self):
         try:
-            header_color = np.array([254, 0, 0])
-            data_color = np.array([255, 192, 0])
-            table, bottom_text = process_pdf(self.file_path, header_color, data_color)
-            scan_result = pdf_check(table, bottom_text)
-            self.scan_completed.emit(self.file_path, scan_result)
+            for file_path in self.uploaded_files:
+                header_color = np.array([254, 0, 0])
+                data_color = np.array([255, 192, 0])
+                table, bottom_text = process_pdf(file_path, self.poppler_path, header_color, data_color)
+                scan_result = pdf_check(self.mt_df, table, bottom_text, self.wb, self.ws)
+                self.scan_completed.emit(file_path, scan_result)
+            self.scan_finished.emit()
         except Exception as e:
             self.scan_error.emit(str(e))
 
@@ -85,6 +127,20 @@ class PDFScannerApp(QMainWindow):
 
         self.active_threads = []
 
+        self.poppler_path = r"poppler-24.07.0\Library\bin"
+
+        self.mt_df = None
+        self.wb = None
+        self.ws = None
+
+        self.show_loading_indicator(True)
+
+        app_init = AppInit('mt_database.xlsx')
+        app_init.init_success.connect(self.on_init_success)
+        app_init.init_error.connect(self.on_init_error)
+        self.active_threads.append(app_init) 
+        app_init.start()  
+
         self.file_list_widget.itemSelectionChanged.connect(self.toggle_delete_button)
 
     def upload_files(self):
@@ -132,12 +188,12 @@ class PDFScannerApp(QMainWindow):
 
         self.show_loading_indicator(True)
 
-        for file_path in self.uploaded_files:
-            scanner_thread = ScannerThread(file_path)
-            scanner_thread.scan_completed.connect(self.on_scan_completed)
-            scanner_thread.scan_error.connect(self.on_scan_error)
-            self.active_threads.append(scanner_thread) 
-            scanner_thread.start()
+        scanner_thread = ScannerThread(self.uploaded_files, self.poppler_path, self.mt_df, self.wb, self.ws)
+        scanner_thread.scan_completed.connect(self.on_scan_completed)
+        scanner_thread.scan_error.connect(self.on_scan_error)
+        scanner_thread.scan_finished.connect(self.on_scan_finished)
+        self.active_threads.append(scanner_thread) 
+        scanner_thread.start()
 
     def toggle_delete_button(self):
         self.delete_button.setEnabled(bool(self.file_list_widget.selectedItems()))
@@ -151,7 +207,12 @@ class PDFScannerApp(QMainWindow):
             self.loading_label.setAlignment(Qt.AlignCenter)
         else:
             self.loading_label.clear()
-        
+
+    def on_scan_finished(self):
+        self.show_loading_indicator(False)
+        for thread in self.active_threads:
+            thread.quit()
+
     def on_scan_completed(self, file_path, scan_result):
         """Handle the completion of a scan."""
         try:
@@ -159,18 +220,25 @@ class PDFScannerApp(QMainWindow):
                 item = self.file_list_widget.item(i)
                 if item.text() == file_path:
                     self.uploaded_files[file_path] = scan_result
-
                     if all(scan_result.values()):
                         item.setBackground(QColor("lightgreen"))
                     else:
                         item.setBackground(QColor("red"))
-
-            self.show_loading_indicator(False)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"An error occurred: {e}")
 
     def on_scan_error(self, error_message):
         """Handle any errors during the scan."""
+        QMessageBox.critical(self, "Error", f"An error occurred during scanning: {error_message}")
+        self.show_loading_indicator(False)
+
+    def on_init_success(self, mt_df, wb, ws):
+        self.mt_df = mt_df
+        self.wb = wb
+        self.ws = ws
+        self.show_loading_indicator(False)
+
+    def on_init_error(self, error_message):
         QMessageBox.critical(self, "Error", f"An error occurred during scanning: {error_message}")
         self.show_loading_indicator(False)
 

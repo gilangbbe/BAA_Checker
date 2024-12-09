@@ -7,11 +7,6 @@ from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
 from datetime import datetime
 
-poppler_path = r"poppler-24.07.0\Library\bin"
-mt_df = pd.read_excel('mt_database.xlsx', sheet_name='Sheet1', engine='openpyxl')
-wb = load_workbook('mt_database.xlsx')
-ws = wb['Sheet1']
-
 def utils_group_row_point(values):
     values = sorted(values, key=lambda x: (x[1], x[0]))
     values = [value for value in values if value[1] >= 50]
@@ -71,11 +66,11 @@ def extract_text_from_bbox(pdf_path, bounding_boxes, bounding_boxes_header):
         bottom_text = page.get_text("text", clip=bottom_half_rect)
     return table_dicts, bottom_text
 
-def process_pdf(pdf_path, header_color, data_color):
+def process_pdf(pdf_path, poppler_path, header_color, data_color):
     """
     Process a PDF to extract text based on specified header and data colors.
     """
-    pages = convert_from_path(pdf_path, 600, poppler_path=poppler_path)
+    pages = convert_from_path(pdf_path, 600, poppler_path=poppler_path, use_pdftocairo=True)
     page = np.array(pages[0]) 
     
     header_bbox = detect_by_color(header_color, page)
@@ -87,51 +82,51 @@ def process_pdf(pdf_path, header_color, data_color):
     return tables[0], bottom_text
     
 
-def pdf_check(df, bottom_text):
+def pdf_check(mt_df, df, bottom_text, wb, ws):
   for i, row in df.iterrows():
-    row_to_check = mt_df[(mt_df['SYSTEM_KEY'] == row['Systemkey']) | (mt_df['SITE_ID'] == row['Origin Site ID'])]
+    row_to_check = mt_df[(mt_df['System Key'] == row['Systemkey'].strip()) | (mt_df['Origin Site ID'] == row['Origin Site ID'].strip())]
     fo_meter_column = [col for col in df.columns if "connection" in col.lower()]
     site_column = [col for col in df.columns if "site" in col.lower()]
     activation_date_column = [col for col in df.columns if "activation" in col.lower()]
     signing_date_column = [col for col in df.columns if "signing" in col.lower()]
     check_dict = {}
     if len(row_to_check) > 0:
-        span_id = row['Span ID'].split('-')
+        span_id = row['Span ID'].strip().split('-')
         ring_id = "-".join(span_id[:4])
         far_end_id = span_id[5]
-
-        span_id_mt_list = [row_to_check['ring_id'].to_string(index=False), row_to_check['SITE_ID'].to_string(index=False), row_to_check['FAR_END_ID'].to_string(index=False)]
+        
+        span_id_mt_list = [row_to_check['Ring ID'].to_string(index=False), row_to_check['Origin Site ID'].to_string(index=False), row_to_check['Destination Site ID'].to_string(index=False)]
         span_id_mt = '-'.join(span_id_mt_list)
         
-        check_dict['SYSTEM_KEY'] = row_to_check['SYSTEM_KEY'].to_string(index=False) == row['Systemkey']
+        check_dict['System Key'] = row_to_check['System Key'].to_string(index=False) == row['Systemkey'].strip()
 
-        check_dict['SITE_ID'] = row_to_check['SITE_ID'].to_string(index=False) == row[site_column[0]]
+        check_dict['Origin Site ID'] = row_to_check['Origin Site ID'].to_string(index=False) == row[site_column[0]].strip()
         
-        check_dict['SITE_NAME'] = row_to_check['SITE_NAME'].to_string(index=False) == row[site_column[1]]
+        check_dict['Origin Site Name'] = row_to_check['Origin Site Name'].to_string(index=False) == row[site_column[1]].strip()
 
-        check_dict['FAR_END_ID'] = row_to_check['FAR_END_ID'].to_string(index=False) == far_end_id
+        check_dict['Destination Site ID'] = row_to_check['Destination Site ID'].to_string(index=False) == far_end_id
 
-        check_dict['ring_id'] = row_to_check['ring_id'].to_string(index=False) == ring_id
+        check_dict['Ring ID'] = row_to_check['Ring ID'].to_string(index=False) == ring_id
  
-        date_object_activation = datetime.strptime(row[activation_date_column[0]], '%d-%b-%y')
-        date_object_signing = datetime.strptime(row[signing_date_column[0]], '%d-%b-%y')
-        check_dict['BAA_TLP'] = date_object_activation == row_to_check['BAA_TLP'].iloc[0]
-        check_dict['BAA_TLP'] = date_object_signing == row_to_check['BAA_TLP'].iloc[0]
+        date_object_activation = datetime.strptime(row[activation_date_column[0]].strip(), '%d-%b-%y')
+        date_object_signing = datetime.strptime(row[signing_date_column[0]].strip(), '%d-%b-%y')
+        check_dict['BAA Date (Aktivasi)'] = date_object_activation == row_to_check['BAA Date (Aktivasi)'].iloc[0]
+        check_dict['BAA Date (Aktivasi)'] = date_object_signing == row_to_check['BAA Date (Aktivasi)'].iloc[0]
+
+        check_dict['Panjang OTDR (M)'] = float(row_to_check['Panjang OTDR (M)'].to_string(index=False)) == float(row[fo_meter_column[0]].strip())
+
+        check_dict['Span ID'] = span_id_mt == row['Span ID'].strip()
         
-        check_dict['FLP_Length'] = row_to_check['FLP_Length'].to_string(index=False) == row[fo_meter_column[0]]
+        check_dict['Signing Date'] = row[activation_date_column[0]] == row[signing_date_column[0]].strip()
 
-        check_dict['SPAN_ID'] = span_id_mt == row['Span ID']
-        
-        check_dict['Signing_Date'] = row[activation_date_column[0]] == row[signing_date_column[0]]
+        check_dict['Signing Person'] = "Mochamad Abbari Ramadhona" in bottom_text
 
-        check_dict['Signing_Person'] = "Mochamad Abbari Ramadhona" in bottom_text
-
-        color_cells_based_on_conditions(check_dict, row['Systemkey'])
+        color_cells_based_on_conditions(wb, ws, check_dict, row['Systemkey'].strip())
     else:
         check_dict['BAA'] = False
     return check_dict
 
-def color_cells_based_on_conditions(condition_dict, filter_value):
+def color_cells_based_on_conditions(wb, ws, condition_dict, filter_value):
     """
     Fills Excel cells with red color based on a condition dictionary and filter value.
 
@@ -150,7 +145,7 @@ def color_cells_based_on_conditions(condition_dict, filter_value):
     column_indices = {key: header_row.index(key) + 1 for key in condition_dict.keys()}
 
     for row in ws.iter_rows(min_row=2):  
-        system_key_value = row[column_indices['SYSTEM_KEY'] - 1].value  
+        system_key_value = row[column_indices['System Key'] - 1].value  
         if str(system_key_value) == filter_value:
             for col_name, condition in condition_dict.items():
                 if not condition:  
