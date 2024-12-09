@@ -3,7 +3,6 @@ import cv2
 import numpy as np
 import pandas as pd
 import pymupdf 
-from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
 from datetime import datetime
 

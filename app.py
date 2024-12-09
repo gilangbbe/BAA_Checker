@@ -14,15 +14,17 @@ from PySide6.QtWidgets import (
     QWidget,
     QMessageBox,
 )
+from urllib.parse import unquote
+import requests
 import pandas as pd
 from PySide6.QtGui import QColor, QMovie
 from pdf_utils import process_pdf, pdf_check
 from openpyxl import load_workbook
 
 class AppInit(QThread):
-    init_complete = Signal()  # For generic completion signal
-    init_error = Signal(str)  # For error handling
-    init_success = Signal(pd.DataFrame, object, object)  # Emits DataFrame, Workbook, Worksheet
+    init_complete = Signal() 
+    init_error = Signal(str) 
+    init_success = Signal(pd.DataFrame, object, object) 
 
     def __init__(self, excel_path):
         super().__init__()
@@ -30,19 +32,53 @@ class AppInit(QThread):
 
     def run(self):
         try:
-            # Load Excel data into pandas DataFrame
             mt_df = pd.read_excel(self.excel_path, sheet_name='Sheet1', engine='openpyxl')
 
-            # Load the workbook and worksheet using openpyxl
             wb = load_workbook(self.excel_path)
             ws = wb['Sheet1']
 
-            # Emit the success signal with the loaded data
             self.init_success.emit(mt_df, wb, ws)
-            self.init_complete.emit()  # Optionally emit a completion signal
+            self.init_complete.emit()
         except Exception as e:
             self.init_error.emit(str(e))
 
+    def clean_up(self):
+        """Method to clean up after thread finishes."""
+       
+        if self.isRunning():
+            self.quit() 
+            self.wait()  
+        self.deleteLater()  
+
+class DownloaderThread(QThread):
+    download_completed = Signal(str)
+    download_finished = Signal()
+    download_error = Signal(str, str)
+
+    def __init__(self, file_link):
+        super().__init__()
+        self.file_link = file_link
+    
+    def run(self):
+        try:
+            for link in self.file_link:
+                url = link.replace("?Web=1", "")
+                file_name = unquote(url.split("/")[-1])
+                output_path = os.path.join("local_storage", file_name)
+                try:
+                    response = requests.get(url)
+                    response.raise_for_status()
+                    with open(output_path, "wb") as file:
+                        file.write(response.content)
+                    self.download_completed.emit(output_path)
+
+                except requests.exceptions.RequestException as e:
+                    self.download_error.emit("download_err",str(e))
+                    break
+        except Exception as e:
+            self.download_error.emit("thread_err", str(e))
+        self.download_finished.emit()
+    
     def clean_up(self):
         """Method to clean up after thread finishes."""
        
@@ -114,11 +150,15 @@ class PDFScannerApp(QMainWindow):
         self.start_button.clicked.connect(self.start_scanning)
         self.start_button.setEnabled(False)
 
+        self.download_button = QPushButton("Download Files")
+        self.download_button.clicked.connect(self.download_files)
+
         self.layout.addWidget(self.info_label)
         self.layout.addWidget(self.file_list_widget)
         self.layout.addWidget(self.upload_button)
         self.layout.addWidget(self.delete_button)
         self.layout.addWidget(self.start_button)
+        self.layout.addWidget(self.download_button)
 
         self.loading_label = QLabel()
         self.layout.addWidget(self.loading_label)
@@ -163,6 +203,34 @@ class PDFScannerApp(QMainWindow):
                     self.file_list_widget.addItem(destination_path)
 
             self.start_button.setEnabled(bool(self.uploaded_files))
+
+    def download_files(self):
+        self.show_loading_indicator(True)
+        file_link = self.mt_df[self.mt_df['BAA Link'].notna()]['BAA Link']
+        downloader_thread = DownloaderThread(file_link) 
+        downloader_thread.download_completed.connect(self.on_download_completed)
+        downloader_thread.download_finished.connect(self.on_download_finished)
+        downloader_thread.download_error.connect(self.on_download_error)
+        self.active_threads.append(downloader_thread) 
+        downloader_thread.start()
+
+    def on_download_completed(self, file_path):
+        if file_path not in self.uploaded_files:
+            self.uploaded_files[file_path] = None
+            self.file_list_widget.addItem(file_path)
+
+    def on_download_finished(self):
+        self.show_loading_indicator(False)
+        for thread in self.active_threads:
+            thread.quit()
+
+    def on_download_error(self, err_type, error_message):
+        if err_type == "download_err":
+            QMessageBox.warning(self, "Error", f"An error occurred during download: {error_message}")
+            self.show_loading_indicator(False)
+        else:
+            QMessageBox.critical(self, "Error", f"An error occurred during download: {error_message}")
+            self.show_loading_indicator(False)
 
     def delete_selected_file(self):
         selected_items = self.file_list_widget.selectedItems()
@@ -239,7 +307,7 @@ class PDFScannerApp(QMainWindow):
         self.show_loading_indicator(False)
 
     def on_init_error(self, error_message):
-        QMessageBox.critical(self, "Error", f"An error occurred during scanning: {error_message}")
+        QMessageBox.critical(self, "Error", f"An error occurred during init: {error_message}")
         self.show_loading_indicator(False)
 
     def closeEvent(self, event):
